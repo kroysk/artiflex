@@ -411,7 +411,17 @@ func installAndStartTunnel(ifaceName, confPath string) error {
 		return fmt.Errorf("error obteniendo nombre de servicio: %w", err)
 	}
 
-	return waitForService(svcName, svc.Running, 10*time.Second)
+	if err := waitForService(svcName, svc.Running, 10*time.Second); err != nil {
+		return err
+	}
+
+	// Asignar métrica alta a la interfaz WireGuard para que Windows NO la use
+	// como ruta por defecto — la red normal del host conserva su prioridad.
+	// Métrica 9000 >> métrica típica de red local (~25). Ignoramos el error
+	// porque la métrica es una optimización, no un requisito crítico.
+	_ = setInterfaceMetric(ifaceName, 9000)
+
+	return nil
 }
 
 // stopAndRemoveTunnel detiene y desinstala el servicio Windows del túnel.
@@ -484,4 +494,14 @@ func waitForService(svcName string, desired svc.State, timeout time.Duration) er
 	}
 
 	return fmt.Errorf("timeout esperando que el servicio %q llegue al estado %v", svcName, desired)
+}
+
+// setInterfaceMetric asigna una métrica fija a una interfaz de red via PowerShell.
+// Métrica alta (ej: 9000) = última prioridad en el routing de Windows.
+func setInterfaceMetric(ifaceName string, metric int) error {
+	script := fmt.Sprintf(`
+Set-NetIPInterface -InterfaceAlias '%s' -InterfaceMetric %d -ErrorAction SilentlyContinue
+`, ifaceName, metric)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	return cmd.Run()
 }

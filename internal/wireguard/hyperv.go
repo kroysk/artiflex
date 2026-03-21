@@ -52,28 +52,34 @@ while (-not $adapter -and $attempts -lt 20) {
     }
 }
 if (-not $adapter) {
-    throw "No se encontró el adaptador vEthernet (%s) después de 10 segundos"
+    throw "No se encontro el adaptador vEthernet (%s) despues de 10 segundos"
 }
 
-# 3. Asignar IP al vEthernet (eliminar existente primero si hay)
-$existing = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
-if ($existing) {
-    Remove-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -Confirm:$false | Out-Null
-}
-New-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -IPAddress '%s' -PrefixLength %d | Out-Null
+# 3. Asignar IP al vEthernet
+# Eliminar TODAS las IPs IPv4 existentes en este adaptador antes de asignar la nuestra
+Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+
+# Esperar un momento para que Windows procese la eliminacion
+Start-Sleep -Milliseconds 300
+
+# Asignar la IP deseada
+New-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -IPAddress '%s' -PrefixLength %d -ErrorAction Stop | Out-Null
 Write-Host "IP %s/%d asignada a vEthernet (%s)"
 
-# 4. Habilitar IP Forwarding en ambos adaptadores
-Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled
-Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled
-Write-Host "IP Forwarding habilitado"
+# 4. Habilitar IP Forwarding en ambos adaptadores y asignar métrica alta
+# para que Windows NO los use como ruta por defecto (tu red normal tiene
+# métrica ~25, estas interfaces tendrán 9000 — última prioridad siempre)
+Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
+Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
+Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
 
 Write-Host "OK: Hyper-V setup completo para '%s'"
 `,
 		switchName, switchName, switchName, switchName, // crear switch
 		switchName, switchName, // esperar adaptador
-		switchName, switchName, // limpiar IP
-		switchName, ip, prefixLen, // asignar IP
+		switchName,                // eliminar IPs existentes
+		switchName, ip, prefixLen, // asignar IP nueva
 		ip, prefixLen, switchName, // log
 		switchName, ifaceName, // forwarding
 		switchName, // log final
@@ -91,15 +97,15 @@ func HyperVTeardown(switchName, ifaceName string) error {
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 
-# 1. Deshabilitar IP Forwarding en el vEthernet
+# 1. Deshabilitar IP Forwarding en el vEthernet y restaurar métrica automática
 $adapter = Get-NetAdapter | Where-Object { $_.Name -eq 'vEthernet (%s)' } -ErrorAction SilentlyContinue
 if ($adapter) {
-    Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Disabled -ErrorAction SilentlyContinue
+    Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Disabled -AutomaticMetric Enabled -ErrorAction SilentlyContinue
     Write-Host "IP Forwarding deshabilitado en vEthernet (%s)"
 }
 
-# 2. Deshabilitar IP Forwarding en WireGuard
-Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Disabled -ErrorAction SilentlyContinue
+# 2. Deshabilitar IP Forwarding en WireGuard y restaurar métrica automática
+Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Disabled -AutomaticMetric Enabled -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding deshabilitado en %s"
 
 # 3. Eliminar el switch (esto elimina también el adaptador vEthernet)
