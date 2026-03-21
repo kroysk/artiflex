@@ -1,0 +1,23 @@
+# Binarios compilados
+prexo.exe
+prexo_new.exe
+/prexo
+
+# Directorio de módulos (si se usa vendor)
+vendor/
+
+# Archivos de debug de Go
+*.prof
+*.test
+
+# Config local (no subir claves!)
+*.json
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
