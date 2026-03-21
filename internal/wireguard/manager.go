@@ -306,9 +306,13 @@ func buildConf(ifaceName string, network config.Network) (*conf.Config, error) {
 		return nil, fmt.Errorf("puerto inválido en endpoint: %w", err)
 	}
 
-	// AllowedIPs: todo el tráfico pasa por el túnel
-	allIPv4, _ := netip.ParsePrefix("0.0.0.0/0")
-	allIPv6, _ := netip.ParsePrefix("::/0")
+	// AllowedIPs: solo la subred interna del túnel (split tunnel).
+	// Usamos el prefijo enmascarado del ClientIP — ej: "10.0.0.2/24" → "10.0.0.0/24".
+	// Esto evita que Windows use esta interfaz como ruta default,
+	// preservando la conexión original del host. Las VMs de Hyper-V
+	// que usen este adaptador virtual acceden al VPS a través del túnel,
+	// pero el tráfico general del host sigue por su red normal.
+	allowedNet := clientPrefix.Masked()
 
 	wgConf := &conf.Config{
 		Name: ifaceName,
@@ -320,7 +324,7 @@ func buildConf(ifaceName string, network config.Network) (*conf.Config, error) {
 		Peers: []conf.Peer{
 			{
 				PublicKey:           *serverPubKey,
-				AllowedIPs:          []netip.Prefix{allIPv4, allIPv6},
+				AllowedIPs:          []netip.Prefix{allowedNet},
 				Endpoint:            conf.Endpoint{Host: host, Port: port},
 				PersistentKeepalive: 25,
 			},
