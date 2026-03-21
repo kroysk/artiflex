@@ -12,21 +12,27 @@ import (
 
 // detailModel es la pantalla de detalles de una red
 type detailModel struct {
-	network   config.Network
-	status    wireguard.TunnelStatus
-	lastError string // último error de conexión, si lo hay
-	width     int
-	height    int
+	network       config.Network
+	status        wireguard.TunnelStatus
+	lastError     string // último error de conexión, si lo hay
+	hypervExists  bool   // si el Internal Switch de Hyper-V ya existe
+	hypervPending bool   // operación Hyper-V en curso
+	hypervResult  string // último resultado de operación Hyper-V
+	hypervErr     bool   // si el último resultado fue error
+	width         int
+	height        int
 }
 
 // newDetailModel crea la pantalla de detalles para una red
 func newDetailModel(network config.Network, status wireguard.TunnelStatus, lastError string, w, h int) detailModel {
+	hypervExists := wireguard.HyperVSwitchExists(network.Name)
 	return detailModel{
-		network:   network,
-		status:    status,
-		lastError: lastError,
-		width:     w,
-		height:    h,
+		network:      network,
+		status:       status,
+		lastError:    lastError,
+		hypervExists: hypervExists,
+		width:        w,
+		height:       h,
 	}
 }
 
@@ -43,8 +49,51 @@ func (m detailModel) Update(msg tea.Msg) (detailModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
-			// Volver a la lista — app.go maneja este caso
+			// app.go maneja la navegación hacia atrás
 			return m, nil
+
+		case "h":
+			if m.hypervPending || m.hypervExists {
+				return m, nil
+			}
+			m.hypervPending = true
+			m.hypervResult = "Configurando Hyper-V..."
+			m.hypervErr = false
+			network := m.network
+			ifaceName := m.status.InterfaceName
+			return m, func() tea.Msg {
+				err := wireguard.HyperVSetup(network.Name, network.ClientIP, ifaceName)
+				return HyperVResultMsg{Setup: true, Err: err}
+			}
+
+		case "x":
+			if m.hypervPending || !m.hypervExists {
+				return m, nil
+			}
+			m.hypervPending = true
+			m.hypervResult = "Eliminando configuración Hyper-V..."
+			m.hypervErr = false
+			network := m.network
+			ifaceName := m.status.InterfaceName
+			return m, func() tea.Msg {
+				err := wireguard.HyperVTeardown(network.Name, ifaceName)
+				return HyperVResultMsg{Setup: false, Err: err}
+			}
+		}
+
+	case HyperVResultMsg:
+		m.hypervPending = false
+		if msg.Err != nil {
+			m.hypervErr = true
+			m.hypervResult = fmt.Sprintf("Error: %v", msg.Err)
+		} else {
+			m.hypervErr = false
+			m.hypervExists = msg.Setup // setup=true → existe, teardown=false → no existe
+			if msg.Setup {
+				m.hypervResult = "✓ Switch Hyper-V configurado — asigná este switch a tu VM"
+			} else {
+				m.hypervResult = "✓ Configuración Hyper-V eliminada"
+			}
 		}
 	}
 	return m, nil
@@ -77,6 +126,9 @@ func (m detailModel) View() string {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FF5F87"))
 
+	successStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#00FF7F"))
+
 	separatorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#444444"))
 
@@ -91,6 +143,9 @@ func (m detailModel) View() string {
 
 	dimStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#626262"))
+
+	pendingStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFD700"))
 
 	footerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#626262")).
@@ -112,10 +167,9 @@ func (m detailModel) View() string {
 		statusStr = inactiveStyle.Render("● Inactiva")
 	}
 
-	// Extraer solo la IP sin el prefijo CIDR para el comando (ej: "10.0.0.2/32" → "10.0.0.2/32")
 	clientIP := m.network.ClientIP
 	if clientIP == "" {
-		clientIP = "10.0.0.2/32"
+		clientIP = "10.0.0.2/24"
 	}
 
 	sep := separatorStyle.Render(strings.Repeat("─", m.width-16))
@@ -154,28 +208,82 @@ func (m detailModel) View() string {
 	rows = append(rows, sectionStyle.Render("▸ Setup del servidor WireGuard"))
 	rows = append(rows, "")
 
-	// Clave pública del cliente
 	pubKey := m.network.ClientPublicKey
 	if pubKey == "" {
 		pubKey = "(no disponible)"
 	}
 	rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("Tu clave pública:"), valueStyle.Render(pubKey)))
 	rows = append(rows, "")
-
-	// Comando completo listo para copiar
 	rows = append(rows, dimStyle.Render("Pegá este comando en tu servidor para autorizar este cliente:"))
 	rows = append(rows, "")
 	cmd := fmt.Sprintf("sudo wg set wg0 peer %s allowed-ips %s", pubKey, clientIP)
-	cmdLines := wrapText(cmd, m.width-20)
-	for _, l := range cmdLines {
+	for _, l := range wrapText(cmd, m.width-20) {
 		rows = append(rows, codeStyle.Render(l))
+	}
+
+	// ── Sección: Hyper-V ────────────────────────────────────────────────────
+	rows = append(rows, "")
+	rows = append(rows, sep)
+	rows = append(rows, "")
+	rows = append(rows, sectionStyle.Render("▸ Hyper-V Internal Switch"))
+	rows = append(rows, "")
+
+	// Estado del switch
+	var hypervStatusStr string
+	if m.hypervExists {
+		hypervStatusStr = successStyle.Render("● Configurado — switch \"" + m.network.Name + "\" existe")
+	} else {
+		hypervStatusStr = dimStyle.Render("○ No configurado")
+	}
+	rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("Estado Hyper-V: "), hypervStatusStr))
+
+	// Resultado de la última operación
+	if m.hypervPending {
+		rows = append(rows, "")
+		rows = append(rows, pendingStyle.Render("  ⟳ "+m.hypervResult))
+	} else if m.hypervResult != "" {
+		rows = append(rows, "")
+		if m.hypervErr {
+			for _, l := range wrapText(m.hypervResult, m.width-20) {
+				rows = append(rows, errorStyle.Render("  "+l))
+			}
+		} else {
+			rows = append(rows, successStyle.Render("  "+m.hypervResult))
+		}
+	}
+
+	// Instrucciones según estado
+	if !m.hypervExists && !m.hypervPending {
+		rows = append(rows, "")
+		if !isActive {
+			rows = append(rows, dimStyle.Render("  Activá la red primero con Space antes de configurar Hyper-V"))
+		} else {
+			rows = append(rows, dimStyle.Render("  Presioná H para crear el Internal Switch y habilitar routing"))
+		}
+	} else if m.hypervExists && !m.hypervPending {
+		rows = append(rows, "")
+		rows = append(rows, dimStyle.Render("  En Hyper-V: Settings → Network Adapter → Virtual switch: \""+m.network.Name+"\""))
+		rows = append(rows, dimStyle.Render("  IP de gateway en la VM: "+m.network.ClientIP))
 	}
 
 	box := boxStyle.Render(strings.Join(rows, "\n"))
 
+	// Footer dinámico según estado
+	var footerParts []string
+	footerParts = append(footerParts, "esc: volver")
+	if !m.hypervPending {
+		if !m.hypervExists && isActive {
+			footerParts = append(footerParts, "h: configurar Hyper-V")
+		}
+		if m.hypervExists {
+			footerParts = append(footerParts, "x: eliminar Hyper-V")
+		}
+	}
+	footerParts = append(footerParts, "q: salir")
+
 	out := titleStyle.Render("Prexo — Detalle de red") + "\n\n"
 	out += box + "\n\n"
-	out += footerStyle.Render("esc: volver  q: salir")
+	out += footerStyle.Render(strings.Join(footerParts, "  "))
 
 	return out
 }

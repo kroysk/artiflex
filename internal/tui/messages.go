@@ -33,3 +33,9 @@ type ShowDetailMsg struct {
 	NetworkID string
 	LastError string // último error de conexión conocido por la lista
 }
+
+// HyperVResultMsg se envía cuando termina una operación de Hyper-V (setup o teardown)
+type HyperVResultMsg struct {
+	Setup bool  // true = setup, false = teardown
+	Err   error // nil si fue exitoso
+}
