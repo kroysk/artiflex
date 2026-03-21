@@ -7,8 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/eduramirezh/prexo/internal/config"
-	"github.com/eduramirezh/prexo/internal/wireguard"
+	"github.com/kroysk/artiflex/internal/config"
+	"github.com/kroysk/artiflex/internal/wireguard"
 	"github.com/google/uuid"
 )
 

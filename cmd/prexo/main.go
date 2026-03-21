@@ -10,9 +10,9 @@ import (
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/eduramirezh/prexo/internal/config"
-	"github.com/eduramirezh/prexo/internal/tui"
-	"github.com/eduramirezh/prexo/internal/wireguard"
+	"github.com/kroysk/artiflex/internal/config"
+	"github.com/kroysk/artiflex/internal/tui"
+	"github.com/kroysk/artiflex/internal/wireguard"
 )
 
 func main() {

@@ -37,7 +37,7 @@ No hace falta configurar nada en WireGuard — Prexo lo maneja todo.
 Conectate a tu VPS por SSH y ejecutá el script de setup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eduramirezh/prexo/main/scripts/server-setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/kroysk/artiflex/main/scripts/server-setup.sh | sudo bash
 ```
 
 O copiando el archivo manualmente:
@@ -146,7 +146,7 @@ Cada red muestra un punto de color:
 Requiere [Go 1.25+](https://go.dev/dl/) instalado.
 
 ```bash
-git clone https://github.com/eduramirezh/prexo
+git clone https://github.com/kroysk/artiflex
 cd prexo
 GOOS=windows GOARCH=amd64 go build -o prexo.exe ./cmd/prexo
 ```

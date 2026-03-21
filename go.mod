@@ -1,4 +1,4 @@
-module github.com/eduramirezh/prexo
+module github.com/kroysk/artiflex
 
 go 1.25.0
 

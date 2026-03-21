@@ -2,8 +2,8 @@ package tui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/eduramirezh/prexo/internal/config"
-	"github.com/eduramirezh/prexo/internal/wireguard"
+	"github.com/kroysk/artiflex/internal/config"
+	"github.com/kroysk/artiflex/internal/wireguard"
 )
 
 // screen identifica qué pantalla está activa

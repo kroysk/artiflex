@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eduramirezh/prexo/internal/config"
+	"github.com/kroysk/artiflex/internal/config"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 	"golang.zx2c4.com/wireguard/windows/conf"
