@@ -23,6 +23,7 @@ import (
 type InterfaceState struct {
 	NetworkID     string
 	InterfaceName string // ej: "wg-prexo-0"
+	ConfPath      string // ruta al .conf en %APPDATA%\Prexo\tunnels\
 	Active        bool
 }
 
@@ -70,21 +71,24 @@ func (m *Manager) Connect(network config.Network) error {
 		return fmt.Errorf("error construyendo config WireGuard: %w", err)
 	}
 
-	// 2. Guardar el .conf en el store de WireGuard Windows
-	if err := wgConf.Save(true); err != nil {
+	// 2. Escribir el .conf directamente en nuestro directorio (evita el
+	//    problema de ownership de conf.Save() en el directorio de WireGuard)
+	confPath := filepath.Join(m.confDir, ifaceName+".conf")
+	if err := writeConfFile(confPath, wgConf); err != nil {
 		return fmt.Errorf("error guardando config WireGuard: %w", err)
 	}
 
 	// 3. Instalar y arrancar el servicio Windows para este túnel
-	if err := installAndStartTunnel(ifaceName); err != nil {
+	if err := installAndStartTunnel(ifaceName, confPath); err != nil {
 		// Limpiar el .conf si falla
-		_ = wgConf.Delete()
+		_ = os.Remove(confPath)
 		return fmt.Errorf("error iniciando túnel WireGuard: %w", err)
 	}
 
 	m.interfaces[network.ID] = &InterfaceState{
 		NetworkID:     network.ID,
 		InterfaceName: ifaceName,
+		ConfPath:      confPath,
 		Active:        true,
 	}
 
@@ -106,10 +110,8 @@ func (m *Manager) Disconnect(networkID string) error {
 		return fmt.Errorf("error deteniendo túnel %q: %w", state.InterfaceName, err)
 	}
 
-	// Eliminar el .conf del store
-	if wgConf, err := conf.LoadFromName(state.InterfaceName); err == nil {
-		_ = wgConf.Delete()
-	}
+	// Eliminar el .conf que escribimos nosotros
+	_ = os.Remove(state.ConfPath)
 
 	state.Active = false
 	delete(m.interfaces, networkID)
@@ -126,30 +128,35 @@ func (m *Manager) ShutdownAll() {
 	for id, state := range m.interfaces {
 		if state.Active {
 			_ = stopAndRemoveTunnel(state.InterfaceName)
-			if wgConf, err := conf.LoadFromName(state.InterfaceName); err == nil {
-				_ = wgConf.Delete()
-			}
+			_ = os.Remove(state.ConfPath)
 		}
 		delete(m.interfaces, id)
 	}
 }
 
-// CleanupOrphans busca y elimina servicios WireGuard con prefijo wg-prexo-*
-// que hayan quedado activos de sesiones anteriores crasheadas.
+// CleanupOrphans busca y elimina archivos .conf huérfanos en nuestro directorio
+// y sus servicios WireGuard asociados, de sesiones anteriores crasheadas.
 func (m *Manager) CleanupOrphans() error {
-	names, err := conf.ListConfigNames()
+	entries, err := os.ReadDir(m.confDir)
 	if err != nil {
-		// Si WireGuard no está instalado todavía, no hay huérfanos
-		return nil
+		return nil // directorio no existe todavía, no hay huérfanos
 	}
 
-	for _, name := range names {
-		if strings.HasPrefix(name, m.prefix) {
-			_ = stopAndRemoveTunnel(name)
-			if wgConf, err := conf.LoadFromName(name); err == nil {
-				_ = wgConf.Delete()
-			}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".conf") {
+			continue
+		}
+		ifaceName := strings.TrimSuffix(name, ".conf")
+		if !strings.HasPrefix(ifaceName, m.prefix) {
+			continue
+		}
+		// Intentar parar el servicio (puede que no exista, no es error)
+		_ = stopAndRemoveTunnel(ifaceName)
+		_ = os.Remove(filepath.Join(m.confDir, name))
 	}
 
 	return nil
@@ -267,6 +274,45 @@ func buildConf(ifaceName string, network config.Network) (*conf.Config, error) {
 	return wgConf, nil
 }
 
+// writeConfFile escribe el .conf de WireGuard como texto plano en la ruta dada.
+// Esto evita usar conf.Save() que requiere ownership del directorio de WireGuard.
+func writeConfFile(path string, c *conf.Config) error {
+	var sb strings.Builder
+
+	// Formatear clave privada
+	privKey := base64.StdEncoding.EncodeToString(c.Interface.PrivateKey[:])
+
+	sb.WriteString("[Interface]\n")
+	sb.WriteString(fmt.Sprintf("PrivateKey = %s\n", privKey))
+
+	for _, addr := range c.Interface.Addresses {
+		sb.WriteString(fmt.Sprintf("Address = %s\n", addr.String()))
+	}
+	for _, dns := range c.Interface.DNS {
+		sb.WriteString(fmt.Sprintf("DNS = %s\n", dns.String()))
+	}
+
+	for _, peer := range c.Peers {
+		pubKey := base64.StdEncoding.EncodeToString(peer.PublicKey[:])
+		sb.WriteString("\n[Peer]\n")
+		sb.WriteString(fmt.Sprintf("PublicKey = %s\n", pubKey))
+		sb.WriteString(fmt.Sprintf("Endpoint = %s:%d\n", peer.Endpoint.Host, peer.Endpoint.Port))
+		for i, ip := range peer.AllowedIPs {
+			if i == 0 {
+				sb.WriteString(fmt.Sprintf("AllowedIPs = %s", ip.String()))
+			} else {
+				sb.WriteString(fmt.Sprintf(", %s", ip.String()))
+			}
+		}
+		sb.WriteString("\n")
+		if peer.PersistentKeepalive > 0 {
+			sb.WriteString(fmt.Sprintf("PersistentKeepalive = %d\n", peer.PersistentKeepalive))
+		}
+	}
+
+	return os.WriteFile(path, []byte(sb.String()), 0600)
+}
+
 // wireguardExePath busca el ejecutable wireguard.exe en las rutas estándar de instalación
 func wireguardExePath() (string, error) {
 	candidates := []string{
@@ -287,21 +333,10 @@ func wireguardExePath() (string, error) {
 
 // installAndStartTunnel instala el túnel como Windows Service y lo arranca.
 // Usa wireguard.exe /installtunnelservice <confPath>
-func installAndStartTunnel(ifaceName string) error {
+func installAndStartTunnel(ifaceName, confPath string) error {
 	wgExe, err := wireguardExePath()
 	if err != nil {
 		return err
-	}
-
-	// Obtener la ruta del .conf guardado
-	wgConf, err := conf.LoadFromName(ifaceName)
-	if err != nil {
-		return fmt.Errorf("no se pudo cargar config %q: %w", ifaceName, err)
-	}
-
-	confPath, err := wgConf.Path()
-	if err != nil {
-		return fmt.Errorf("no se pudo obtener ruta del config: %w", err)
 	}
 
 	// wireguard.exe /installtunnelservice <confPath>
