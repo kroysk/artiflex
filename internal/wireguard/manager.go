@@ -162,6 +162,62 @@ func (m *Manager) CleanupOrphans() error {
 	return nil
 }
 
+// TunnelStatus contiene el estado actual de un túnel WireGuard
+type TunnelStatus struct {
+	ServiceState  string // "Corriendo", "Detenido", "No instalado", "Desconocido"
+	InterfaceName string // nombre de la interfaz, vacío si no está activa
+}
+
+// GetStatus devuelve el estado actual del servicio Windows para una red.
+// No requiere que la red esté en el mapa interno — consulta el SCM directamente.
+func (m *Manager) GetStatus(networkID string) TunnelStatus {
+	m.mu.RLock()
+	state, exists := m.interfaces[networkID]
+	m.mu.RUnlock()
+
+	if !exists || !state.Active {
+		return TunnelStatus{ServiceState: "No instalado"}
+	}
+
+	svcName, err := conf.ServiceNameOfTunnel(state.InterfaceName)
+	if err != nil {
+		return TunnelStatus{InterfaceName: state.InterfaceName, ServiceState: "Desconocido"}
+	}
+
+	scm, err := mgr.Connect()
+	if err != nil {
+		return TunnelStatus{InterfaceName: state.InterfaceName, ServiceState: "Desconocido"}
+	}
+	defer scm.Disconnect()
+
+	s, err := scm.OpenService(svcName)
+	if err != nil {
+		return TunnelStatus{InterfaceName: state.InterfaceName, ServiceState: "No instalado"}
+	}
+	defer s.Close()
+
+	status, err := s.Query()
+	if err != nil {
+		return TunnelStatus{InterfaceName: state.InterfaceName, ServiceState: "Desconocido"}
+	}
+
+	var stateStr string
+	switch status.State {
+	case svc.Running:
+		stateStr = "Corriendo"
+	case svc.Stopped:
+		stateStr = "Detenido"
+	case svc.StartPending:
+		stateStr = "Iniciando..."
+	case svc.StopPending:
+		stateStr = "Deteniéndose..."
+	default:
+		stateStr = "Desconocido"
+	}
+
+	return TunnelStatus{InterfaceName: state.InterfaceName, ServiceState: stateStr}
+}
+
 // IsActive reporta si una red está activa en esta sesión
 func (m *Manager) IsActive(networkID string) bool {
 	m.mu.RLock()

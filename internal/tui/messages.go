@@ -27,3 +27,9 @@ type PingResultMsg struct {
 	NetworkID string
 	Alive     bool
 }
+
+// ShowDetailMsg se envía cuando el usuario presiona Enter sobre una red
+type ShowDetailMsg struct {
+	NetworkID string
+	LastError string // último error de conexión conocido por la lista
+}

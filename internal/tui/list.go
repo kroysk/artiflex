@@ -88,7 +88,8 @@ type listModel struct {
 	store      *config.Store
 	wgManager  *wireguard.Manager
 	pinger     *wireguard.Pinger
-	pingStatus map[string]bool // networkID -> alive (solo redes con resultado conocido)
+	pingStatus map[string]bool   // networkID -> alive (solo redes con resultado conocido)
+	lastErrors map[string]string // networkID -> último error de conexión
 	err        string
 }
 
@@ -129,6 +130,7 @@ func newListModel(store *config.Store, wgManager *wireguard.Manager, pinger *wir
 		wgManager:  wgManager,
 		pinger:     pinger,
 		pingStatus: make(map[string]bool),
+		lastErrors: make(map[string]string),
 	}
 }
 
@@ -151,13 +153,18 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 			// La app principal maneja este caso cambiando a la pantalla de formulario
 		case key.Matches(msg, keys.Delete):
 			return m.handleDelete()
+		case key.Matches(msg, keys.Detail):
+			return m.handleDetail()
 		}
 
 	case NetworkToggledMsg:
 		if msg.Err != nil {
 			m.err = fmt.Sprintf("Error: %v", msg.Err)
+			// Guardar el error para mostrarlo en el detail screen
+			m.lastErrors[msg.NetworkID] = msg.Err.Error()
 		} else {
 			m.err = ""
+			delete(m.lastErrors, msg.NetworkID)
 			if msg.Active {
 				// Red conectada: arrancar ping para ella
 				if n, found := m.store.GetByID(msg.NetworkID); found {
@@ -287,5 +294,17 @@ func waitForPingResult(p *wireguard.Pinger) tea.Cmd {
 	return func() tea.Msg {
 		result := <-p.Results()
 		return PingResultMsg{NetworkID: result.NetworkID, Alive: result.Alive}
+	}
+}
+
+// handleDetail abre el detail screen para la red seleccionada
+func (m listModel) handleDetail() (listModel, tea.Cmd) {
+	network, ok := m.selectedNetwork()
+	if !ok {
+		return m, nil
+	}
+	lastErr := m.lastErrors[network.ID]
+	return m, func() tea.Msg {
+		return ShowDetailMsg{NetworkID: network.ID, LastError: lastErr}
 	}
 }

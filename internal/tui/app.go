@@ -15,6 +15,7 @@ const (
 	screenTutorialsMenu
 	screenTutorialOracle
 	screenTutorialGoogle
+	screenDetail
 )
 
 // App es el modelo raíz de bubbletea — orquesta las pantallas
@@ -24,6 +25,7 @@ type App struct {
 	form          formModel
 	tutorialsMenu tutorialsMenuModel
 	tutorial      tutorialModel
+	detail        detailModel
 	store         *config.Store
 	wgManager     *wireguard.Manager
 	pinger        *wireguard.Pinger
@@ -79,6 +81,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case screenTutorialOracle, screenTutorialGoogle:
 				a.current = screenTutorialsMenu
 				return a, nil
+			case screenDetail:
+				a.current = screenList
+				return a, nil
 			}
 		}
 
@@ -114,6 +119,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tutorial = newTutorialModel(msg.Provider, a.width, a.height)
 		return a, a.tutorial.Init()
 
+	// Abrir pantalla de detalles de una red
+	case ShowDetailMsg:
+		if network, found := a.store.GetByID(msg.NetworkID); found {
+			status := a.wgManager.GetStatus(msg.NetworkID)
+			a.detail = newDetailModel(network, status, msg.LastError, a.width, a.height)
+			a.current = screenDetail
+		}
+		return a, nil
+
 	// Red agregada (o cancelación del formulario)
 	case NetworkAddedMsg:
 		a.current = screenList
@@ -146,6 +160,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.tutorial, cmd = a.tutorial.Update(msg)
 		return a, cmd
+
+	case screenDetail:
+		var cmd tea.Cmd
+		a.detail, cmd = a.detail.Update(msg)
+		return a, cmd
 	}
 
 	return a, nil
@@ -160,6 +179,8 @@ func (a App) View() string {
 		return a.tutorialsMenu.View()
 	case screenTutorialOracle, screenTutorialGoogle:
 		return a.tutorial.View()
+	case screenDetail:
+		return a.detail.View()
 	default:
 		return a.list.View()
 	}
