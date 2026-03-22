@@ -25,15 +25,17 @@ type InterfaceState struct {
 	InterfaceName string // ej: "wg-prexo-0"
 	ConfPath      string // ruta al .conf en %APPDATA%\Prexo\tunnels\
 	Active        bool
+	FullTunnel    bool // true = todo el tráfico del PC pasa por este túnel
 }
 
 // Manager gestiona el ciclo de vida de las interfaces WireGuard en Windows
 // usando el Windows Service Control Manager (SCM) y el driver de WireGuard.
 type Manager struct {
-	mu         sync.RWMutex
-	interfaces map[string]*InterfaceState // networkID -> state
-	prefix     string
-	confDir    string // directorio donde se guardan los .conf temporales
+	mu           sync.RWMutex
+	interfaces   map[string]*InterfaceState // networkID -> state
+	prefix       string
+	confDir      string // directorio donde se guardan los .conf temporales
+	fullTunnelID string // networkID de la red en modo full tunnel (vacío = ninguna)
 }
 
 // NewManager crea un nuevo WireGuard manager.
@@ -225,6 +227,128 @@ func (m *Manager) IsActive(networkID string) bool {
 
 	state, exists := m.interfaces[networkID]
 	return exists && state.Active
+}
+
+// IsFullTunnel reporta si una red está en modo full tunnel
+func (m *Manager) IsFullTunnel(networkID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.fullTunnelID == networkID
+}
+
+// FullTunnelID devuelve el networkID de la red en modo full tunnel, o vacío si ninguna
+func (m *Manager) FullTunnelID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.fullTunnelID
+}
+
+// SetFullTunnel activa el modo full tunnel para una red activa:
+// - Si otra red ya está en full tunnel, la revierte a split primero
+// - Reescribe el .conf con AllowedIPs = 0.0.0.0/0, ::/0 y reinicia el servicio
+func (m *Manager) SetFullTunnel(networkID string, clientIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists := m.interfaces[networkID]
+	if !exists || !state.Active {
+		return fmt.Errorf("la red %q no está activa", networkID)
+	}
+
+	// Revertir la red actual en full tunnel si es otra distinta
+	if m.fullTunnelID != "" && m.fullTunnelID != networkID {
+		if prev, ok := m.interfaces[m.fullTunnelID]; ok {
+			_ = rewriteAndRestartTunnel(prev.InterfaceName, prev.ConfPath, false, "")
+			prev.FullTunnel = false
+		}
+	}
+
+	if err := rewriteAndRestartTunnel(state.InterfaceName, state.ConfPath, true, clientIP); err != nil {
+		return err
+	}
+
+	state.FullTunnel = true
+	m.fullTunnelID = networkID
+	return nil
+}
+
+// SetSplitTunnel desactiva el modo full tunnel de una red y vuelve a split:
+// - Reescribe el .conf con AllowedIPs = subred del clientIP y reinicia el servicio
+func (m *Manager) SetSplitTunnel(networkID string, clientIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists := m.interfaces[networkID]
+	if !exists || !state.Active {
+		return fmt.Errorf("la red %q no está activa", networkID)
+	}
+
+	if err := rewriteAndRestartTunnel(state.InterfaceName, state.ConfPath, false, clientIP); err != nil {
+		return err
+	}
+
+	state.FullTunnel = false
+	if m.fullTunnelID == networkID {
+		m.fullTunnelID = ""
+	}
+	return nil
+}
+
+// rewriteAndRestartTunnel reescribe el .conf de un túnel activo cambiando AllowedIPs
+// y reinicia el servicio WireGuard para aplicar el cambio.
+//
+// fullTunnel=true  → AllowedIPs = 0.0.0.0/0, ::/0  (todo el tráfico por el túnel)
+// fullTunnel=false → AllowedIPs = subred del clientIP (solo tráfico interno)
+func rewriteAndRestartTunnel(ifaceName, confPath string, fullTunnel bool, clientIP string) error {
+	// 1. Leer el .conf actual y modificar solo la línea AllowedIPs
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return fmt.Errorf("error leyendo conf %q: %w", confPath, err)
+	}
+
+	var newAllowedIPs string
+	if fullTunnel {
+		newAllowedIPs = "0.0.0.0/0, ::/0"
+	} else {
+		// Calcular la subred enmascarada del clientIP (ej: "10.0.0.2/24" → "10.0.0.0/24")
+		prefix, err := netip.ParsePrefix(clientIP)
+		if err != nil {
+			return fmt.Errorf("clientIP inválido %q: %w", clientIP, err)
+		}
+		newAllowedIPs = prefix.Masked().String()
+	}
+
+	// Reemplazar la línea AllowedIPs en el .conf
+	lines := strings.Split(string(data), "\n")
+	replaced := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "AllowedIPs") {
+			lines[i] = "AllowedIPs = " + newAllowedIPs
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		return fmt.Errorf("no se encontró AllowedIPs en el conf %q", confPath)
+	}
+
+	newData := []byte(strings.Join(lines, "\n"))
+	if err := os.WriteFile(confPath, newData, 0600); err != nil {
+		return fmt.Errorf("error escribiendo conf %q: %w", confPath, err)
+	}
+
+	// 2. Detener el servicio actual
+	if err := stopAndRemoveTunnel(ifaceName); err != nil {
+		return fmt.Errorf("error deteniendo túnel para reinicio: %w", err)
+	}
+
+	// 3. Reinstalar con el .conf actualizado
+	if err := installAndStartTunnel(ifaceName, confPath); err != nil {
+		return fmt.Errorf("error reiniciando túnel: %w", err)
+	}
+
+	return nil
 }
 
 // GetInterfaceName devuelve el nombre de interfaz Windows para una red activa
