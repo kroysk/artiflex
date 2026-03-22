@@ -82,7 +82,7 @@ func (m detailModel) Update(msg tea.Msg) (detailModel, tea.Cmd) {
 			network := m.network
 			ifaceName := m.status.InterfaceName
 			return m, func() tea.Msg {
-				err := wireguard.HyperVSetup(network.Name, network.ClientIP, ifaceName)
+				err := wireguard.HyperVSetup(network.Name, ifaceName)
 				return HyperVResultMsg{Setup: true, Err: err}
 			}
 
@@ -307,8 +307,11 @@ func (m detailModel) View() string {
 		}
 	} else if m.hypervExists && !m.hypervPending {
 		rows = append(rows, "")
+		gwIP := wireguard.HyperVGatewayIP(m.network.Name)
+		gwCIDR := wireguard.HyperVGatewayCIDR(m.network.Name)
 		rows = append(rows, dimStyle.Render("  En Hyper-V: Settings → Network Adapter → Virtual switch: \""+m.network.Name+"\""))
-		rows = append(rows, dimStyle.Render("  IP de gateway en la VM: "+m.network.ClientIP))
+		rows = append(rows, dimStyle.Render("  Gateway en la VM: "+gwIP))
+		rows = append(rows, dimStyle.Render("  Subred VM (NAT): "+gwCIDR))
 	}
 
 	box := boxStyle.Render(strings.Join(rows, "\n"))
