@@ -123,7 +123,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ShowDetailMsg:
 		if network, found := a.store.GetByID(msg.NetworkID); found {
 			status := a.wgManager.GetStatus(msg.NetworkID)
-			a.detail = newDetailModel(network, status, msg.LastError, a.width, a.height)
+			a.detail = newDetailModel(network, a.wgManager, status, msg.LastError, a.width, a.height)
 			a.current = screenDetail
 		}
 		return a, nil
@@ -137,6 +137,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.list.err = msg.Err.Error()
 		}
 		return a, nil
+
+	// Full tunnel toggled: sincronizar lista y detail (estén en la pantalla que estén)
+	case FullTunnelToggledMsg:
+		var listCmd, detailCmd tea.Cmd
+		a.list, listCmd = a.list.Update(msg)
+		a.detail, detailCmd = a.detail.Update(msg)
+		return a, tea.Batch(listCmd, detailCmd)
 	}
 
 	// Delegar a la pantalla activa
@@ -166,7 +173,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.detail, cmd = a.detail.Update(msg)
 		return a, cmd
 	}
-
 	return a, nil
 }
 

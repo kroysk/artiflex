@@ -12,17 +12,19 @@ import (
 )
 
 var (
-	pingAliveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF7F"))
-	pingDeadStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
-	pingGrayStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+	pingAliveStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF7F"))
+	pingDeadStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
+	pingGrayStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+	fullTunnelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
 )
 
 // networkItem implementa list.Item para mostrar redes en la lista
 type networkItem struct {
-	network   config.Network
-	active    bool
-	pingAlive bool // true = VPS responde ping (solo válido si active == true)
-	pingKnown bool // true = ya recibimos al menos un resultado de ping
+	network    config.Network
+	active     bool
+	pingAlive  bool // true = VPS responde ping (solo válido si active == true)
+	pingKnown  bool // true = ya recibimos al menos un resultado de ping
+	fullTunnel bool // true = esta red está en modo full tunnel
 }
 
 func (i networkItem) Title() string {
@@ -30,6 +32,8 @@ func (i networkItem) Title() string {
 	switch {
 	case !i.active:
 		dot = pingGrayStyle.Render("○")
+	case i.fullTunnel:
+		dot = fullTunnelStyle.Render("◉") // dorado: full tunnel activo
 	case !i.pingKnown:
 		dot = pingGrayStyle.Render("●") // conectada pero sin resultado aún
 	case i.pingAlive:
@@ -52,11 +56,12 @@ func (i networkItem) FilterValue() string { return i.network.Name }
 
 // keyMap define los atajos de teclado para la lista
 type keyMap struct {
-	Toggle key.Binding
-	New    key.Binding
-	Delete key.Binding
-	Detail key.Binding
-	Quit   key.Binding
+	Toggle     key.Binding
+	New        key.Binding
+	Delete     key.Binding
+	Detail     key.Binding
+	FullTunnel key.Binding
+	Quit       key.Binding
 }
 
 var keys = keyMap{
@@ -76,6 +81,10 @@ var keys = keyMap{
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "detalles"),
 	),
+	FullTunnel: key.NewBinding(
+		key.WithKeys("f", "F"),
+		key.WithHelp("f", "full tunnel"),
+	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "salir"),
@@ -84,13 +93,14 @@ var keys = keyMap{
 
 // listModel es el modelo bubbletea para la pantalla de lista de redes
 type listModel struct {
-	list       list.Model
-	store      *config.Store
-	wgManager  *wireguard.Manager
-	pinger     *wireguard.Pinger
-	pingStatus map[string]bool   // networkID -> alive (solo redes con resultado conocido)
-	lastErrors map[string]string // networkID -> último error de conexión
-	err        string
+	list         list.Model
+	store        *config.Store
+	wgManager    *wireguard.Manager
+	pinger       *wireguard.Pinger
+	pingStatus   map[string]bool   // networkID -> alive (solo redes con resultado conocido)
+	lastErrors   map[string]string // networkID -> último error de conexión
+	fullTunnelID string            // networkID de la red en modo full tunnel (vacío = ninguna)
+	err          string
 }
 
 // newListModel crea el modelo de lista con todas las redes del store
@@ -121,16 +131,17 @@ func newListModel(store *config.Store, wgManager *wireguard.Manager, pinger *wir
 		Padding(0, 1)
 
 	l.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{keys.Toggle, keys.New, keys.Delete, keys.Detail}
+		return []key.Binding{keys.Toggle, keys.New, keys.Delete, keys.Detail, keys.FullTunnel}
 	}
 
 	return listModel{
-		list:       l,
-		store:      store,
-		wgManager:  wgManager,
-		pinger:     pinger,
-		pingStatus: make(map[string]bool),
-		lastErrors: make(map[string]string),
+		list:         l,
+		store:        store,
+		wgManager:    wgManager,
+		pinger:       pinger,
+		pingStatus:   make(map[string]bool),
+		lastErrors:   make(map[string]string),
+		fullTunnelID: wgManager.FullTunnelID(),
 	}
 }
 
@@ -155,6 +166,10 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 			return m.handleDelete()
 		case key.Matches(msg, keys.Detail):
 			return m.handleDetail()
+		case key.Matches(msg, keys.FullTunnel):
+			if network, ok := m.selectedNetwork(); ok && m.wgManager.IsActive(network.ID) {
+				return m, m.handleFullTunnelToggle(network)
+			}
 		}
 
 	case NetworkToggledMsg:
@@ -171,11 +186,26 @@ func (m listModel) Update(msg tea.Msg) (listModel, tea.Cmd) {
 					m.pinger.Start(msg.NetworkID, n.ServerEndpoint)
 				}
 			} else {
-				// Red desconectada: parar ping y limpiar estado
+				// Red desconectada: parar ping, limpiar estado y full tunnel si corresponde
 				m.pinger.Stop(msg.NetworkID)
 				delete(m.pingStatus, msg.NetworkID)
+				if m.fullTunnelID == msg.NetworkID {
+					m.fullTunnelID = ""
+				}
 			}
 			m.refreshItems()
+		}
+
+	case FullTunnelToggledMsg:
+		if msg.Err != nil {
+			m.err = fmt.Sprintf("Error full tunnel: %v", msg.Err)
+		} else {
+			m.err = ""
+			if msg.FullTunnel {
+				m.fullTunnelID = msg.NetworkID
+			} else if m.fullTunnelID == msg.NetworkID {
+				m.fullTunnelID = ""
+			}
 		}
 
 	case NetworkDeletedMsg:
@@ -222,7 +252,7 @@ func (m listModel) View() string {
 	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#626262")).
 		Padding(0, 1)
-	view += "\n" + helpStyle.Render("space: encender/apagar  n: nueva red  d: eliminar  t: tutoriales  q: salir")
+	view += "\n" + helpStyle.Render("space: encender/apagar  f: full tunnel  n: nueva red  d: eliminar  t: tutoriales  q: salir")
 
 	return view
 }
@@ -280,10 +310,11 @@ func (m *listModel) refreshItems() {
 		active := m.wgManager.IsActive(n.ID)
 		alive, known := m.pingStatus[n.ID]
 		items[i] = networkItem{
-			network:   n,
-			active:    active,
-			pingAlive: alive,
-			pingKnown: known && active,
+			network:    n,
+			active:     active,
+			pingAlive:  alive,
+			pingKnown:  known && active,
+			fullTunnel: active && m.fullTunnelID == n.ID,
 		}
 	}
 	m.list.SetItems(items)
@@ -306,5 +337,18 @@ func (m listModel) handleDetail() (listModel, tea.Cmd) {
 	lastErr := m.lastErrors[network.ID]
 	return m, func() tea.Msg {
 		return ShowDetailMsg{NetworkID: network.ID, LastError: lastErr}
+	}
+}
+
+// handleFullTunnelToggle alterna el modo full tunnel de la red seleccionada
+func (m listModel) handleFullTunnelToggle(network config.Network) tea.Cmd {
+	return func() tea.Msg {
+		isFull := m.wgManager.IsFullTunnel(network.ID)
+		if isFull {
+			err := m.wgManager.SetSplitTunnel(network.ID, network.ClientIP)
+			return FullTunnelToggledMsg{NetworkID: network.ID, FullTunnel: false, Err: err}
+		}
+		err := m.wgManager.SetFullTunnel(network.ID, network.ClientIP)
+		return FullTunnelToggledMsg{NetworkID: network.ID, FullTunnel: true, Err: err}
 	}
 }

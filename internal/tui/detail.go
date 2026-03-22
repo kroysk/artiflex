@@ -13,24 +13,29 @@ import (
 // detailModel es la pantalla de detalles de una red
 type detailModel struct {
 	network       config.Network
+	wgManager     *wireguard.Manager
 	status        wireguard.TunnelStatus
 	lastError     string // último error de conexión, si lo hay
 	hypervExists  bool   // si el Internal Switch de Hyper-V ya existe
 	hypervPending bool   // operación Hyper-V en curso
 	hypervResult  string // último resultado de operación Hyper-V
 	hypervErr     bool   // si el último resultado fue error
+	fullTunnel    bool   // true = esta red está en modo full tunnel
+	ftErr         string // último error de operación full tunnel
 	width         int
 	height        int
 }
 
 // newDetailModel crea la pantalla de detalles para una red
-func newDetailModel(network config.Network, status wireguard.TunnelStatus, lastError string, w, h int) detailModel {
+func newDetailModel(network config.Network, wgManager *wireguard.Manager, status wireguard.TunnelStatus, lastError string, w, h int) detailModel {
 	hypervExists := wireguard.HyperVSwitchExists(network.Name)
 	return detailModel{
 		network:      network,
+		wgManager:    wgManager,
 		status:       status,
 		lastError:    lastError,
 		hypervExists: hypervExists,
+		fullTunnel:   wgManager.IsFullTunnel(network.ID),
 		width:        w,
 		height:       h,
 	}
@@ -51,6 +56,21 @@ func (m detailModel) Update(msg tea.Msg) (detailModel, tea.Cmd) {
 		case "esc":
 			// app.go maneja la navegación hacia atrás
 			return m, nil
+
+		case "f", "F":
+			isActive := m.status.ServiceState == "Corriendo"
+			if !isActive {
+				return m, nil
+			}
+			network := m.network
+			return m, func() tea.Msg {
+				if m.wgManager.IsFullTunnel(network.ID) {
+					err := m.wgManager.SetSplitTunnel(network.ID, network.ClientIP)
+					return FullTunnelToggledMsg{NetworkID: network.ID, FullTunnel: false, Err: err}
+				}
+				err := m.wgManager.SetFullTunnel(network.ID, network.ClientIP)
+				return FullTunnelToggledMsg{NetworkID: network.ID, FullTunnel: true, Err: err}
+			}
 
 		case "h":
 			if m.hypervPending || m.hypervExists {
@@ -78,6 +98,16 @@ func (m detailModel) Update(msg tea.Msg) (detailModel, tea.Cmd) {
 			return m, func() tea.Msg {
 				err := wireguard.HyperVTeardown(network.Name, ifaceName)
 				return HyperVResultMsg{Setup: false, Err: err}
+			}
+		}
+
+	case FullTunnelToggledMsg:
+		if msg.NetworkID == m.network.ID {
+			if msg.Err != nil {
+				m.ftErr = fmt.Sprintf("Error full tunnel: %v", msg.Err)
+			} else {
+				m.ftErr = ""
+				m.fullTunnel = msg.FullTunnel
 			}
 		}
 
@@ -188,6 +218,21 @@ func (m detailModel) View() string {
 
 	rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("Servicio Win:   "), valueStyle.Render(m.status.ServiceState)))
 
+	// ── Full Tunnel ─────────────────────────────────────────────────────────
+	if isActive {
+		ftStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Bold(true)
+		var ftStatusStr string
+		if m.fullTunnel {
+			ftStatusStr = ftStyle.Render("◉ ACTIVO — todo el tráfico pasa por este túnel")
+		} else {
+			ftStatusStr = dimStyle.Render("○ split (solo tráfico interno)")
+		}
+		rows = append(rows, fmt.Sprintf("%s %s", labelStyle.Render("Full Tunnel:    "), ftStatusStr))
+		if m.ftErr != "" {
+			rows = append(rows, errorStyle.Render("  "+m.ftErr))
+		}
+	}
+
 	// ── Error (si hay) ──────────────────────────────────────────────────────
 	if m.lastError != "" {
 		rows = append(rows, "")
@@ -271,6 +316,9 @@ func (m detailModel) View() string {
 	// Footer dinámico según estado
 	var footerParts []string
 	footerParts = append(footerParts, "esc: volver")
+	if isActive {
+		footerParts = append(footerParts, "f: full tunnel")
+	}
 	if !m.hypervPending {
 		if !m.hypervExists && isActive {
 			footerParts = append(footerParts, "h: configurar Hyper-V")
