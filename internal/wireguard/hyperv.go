@@ -25,15 +25,10 @@ func HyperVSetup(switchName, clientIP, ifaceName string) error {
 	ip := prefix.Addr().String()
 	mask := prefixLenToMask(prefix.Bits())
 
-	// Script PowerShell:
-	// 1. Crea el Internal Switch si no existe
-	// 2. Espera el adaptador vEthernet
-	// 3. Asigna IP solo si la IP correcta no está ya asignada:
-	//    - Elimina IPs existentes con netsh (ignorando errores)
-	//    - Asigna la IP deseada con netsh (ignorando "already exists")
-	//    - Verifica que la IP correcta quedó asignada al final
-	// 4. Habilita IP Forwarding en vEthernet y WireGuard
-	script := fmt.Sprintf(`
+	// Construimos el script en partes para evitar problemas de conteo de %s/%d.
+	// Cada sección usa su propio fmt.Sprintf con variables nombradas explícitamente.
+	s := switchName
+	part1 := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 
 # 1. Crear Internal Switch si no existe
@@ -59,55 +54,64 @@ if (-not $adapter) {
     throw "No se encontro el adaptador vEthernet (%s) despues de 10 segundos"
 }
 
-# 3. Asignar IP — verificar primero si la IP correcta ya está asignada
-$correctIP = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -eq '%s' }
+# Esperar extra para que el stack de red inicialice el adaptador completamente
+Start-Sleep -Milliseconds 1500
+`, s, s, s, s, s, s)
 
-if ($correctIP) {
-    Write-Host "IP %s ya estaba asignada correctamente a vEthernet (%s)"
-} else {
-    # Eliminar IPs existentes con netsh (silencioso — puede fallar si no hay ninguna)
-    $existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    foreach ($existingIP in $existingIPs) {
-        netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) 2>$null | Out-Null
+	part2 := fmt.Sprintf(`
+# 3. Asignar IP: verificar si la correcta ya esta, si no reintentar hasta 5 veces
+$targetIP = '%s'
+$targetMask = '%s'
+$alias = 'vEthernet (%s)'
+
+$assigned = $false
+for ($i = 0; $i -lt 5; $i++) {
+    # Verificar si la IP correcta ya esta asignada
+    $current = Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $targetIP }
+    if ($current) {
+        Write-Host "IP $targetIP ya asignada correctamente a $alias"
+        $assigned = $true
+        break
     }
-    Start-Sleep -Milliseconds 800
 
-    # Asignar con netsh — ignorar exit code porque puede reportar "already exists"
-    # aunque la asignación haya sido exitosa
-    netsh interface ipv4 add address "vEthernet (%s)" address='%s' mask='%s' 2>$null | Out-Null
-
-    # Verificar que la IP quedó asignada correctamente (esta es la fuente de verdad)
+    # Eliminar IPs existentes (pueden estar en estado de inicializacion)
+    $existing = Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    foreach ($e in $existing) {
+        netsh interface ipv4 delete address $alias addr=$($e.IPAddress) 2>&1 | Out-Null
+    }
     Start-Sleep -Milliseconds 500
-    $assigned = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -eq '%s' }
-    if (-not $assigned) {
-        throw "No se pudo asignar la IP %s a vEthernet (%s) — verificar permisos"
+
+    # Intentar asignar con netsh
+    netsh interface ipv4 add address $alias address=$targetIP mask=$targetMask 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 600
+
+    # Verificar resultado
+    $current = Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $targetIP }
+    if ($current) {
+        Write-Host "IP $targetIP asignada a $alias (intento $($i+1))"
+        $assigned = $true
+        break
     }
-    Write-Host "IP %s/%s asignada a vEthernet (%s)"
+    Write-Host "Intento $($i+1) fallido, reintentando..."
+    Start-Sleep -Milliseconds 500
 }
 
+if (-not $assigned) {
+    throw "No se pudo asignar la IP $targetIP a $alias despues de 5 intentos"
+}
+`, ip, mask, s)
+
+	part3 := fmt.Sprintf(`
 # 4. Habilitar IP Forwarding y metrica alta en ambos adaptadores
 Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
 Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
-
 Write-Host "OK: Hyper-V setup completo para '%s'"
-`,
-		switchName, switchName, switchName, switchName, // 1. crear switch (4x %s)
-		switchName, switchName, // 2. esperar adaptador (2x %s)
-		switchName, ip, // 3. verificar IP correcta (switchName, ip)
-		ip, switchName, // log ya existia (ip, switchName)
-		switchName, switchName, // eliminar IPs existentes (2x switchName)
-		switchName, ip, mask, // netsh add (switchName, ip, mask)
-		switchName, ip, // verificar asignacion (switchName, ip)
-		ip, switchName, // throw si fallo (ip, switchName)
-		ip, mask, switchName, // log asignacion exitosa (ip, mask, switchName)
-		switchName, ifaceName, // 4. forwarding (2x)
-		switchName, // log final
-	)
+`, s, ifaceName, s)
 
-	return runPowerShell(script)
+	return runPowerShell(part1 + part2 + part3)
 }
 
 // prefixLenToMask convierte un prefijo CIDR a máscara de subred en notación decimal
