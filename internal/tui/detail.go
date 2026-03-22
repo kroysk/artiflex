@@ -309,9 +309,16 @@ func (m detailModel) View() string {
 		rows = append(rows, "")
 		gwIP := wireguard.HyperVGatewayIP(m.network.Name)
 		gwCIDR := wireguard.HyperVGatewayCIDR(m.network.Name)
+		vmIP := wireguard.HyperVSuggestedVMIP(m.network.Name)
 		rows = append(rows, dimStyle.Render("  En Hyper-V: Settings → Network Adapter → Virtual switch: \""+m.network.Name+"\""))
 		rows = append(rows, dimStyle.Render("  Gateway en la VM: "+gwIP))
 		rows = append(rows, dimStyle.Render("  Subred VM (NAT): "+gwCIDR))
+		rows = append(rows, "")
+		rows = append(rows, sectionStyle.Render("  Config VM sugerida"))
+		rows = append(rows, dimStyle.Render("    IP:      "+vmIP))
+		rows = append(rows, dimStyle.Render("    Máscara: 255.255.255.0"))
+		rows = append(rows, dimStyle.Render("    Gateway: "+gwIP))
+		rows = append(rows, dimStyle.Render("    DNS:     1.1.1.1, 8.8.8.8"))
 	}
 
 	box := boxStyle.Render(strings.Join(rows, "\n"))

@@ -5,6 +5,7 @@ package wireguard
 import (
 	"fmt"
 	"hash/fnv"
+	"net/netip"
 	"os/exec"
 	"strings"
 )
@@ -135,6 +136,18 @@ func HyperVGatewayIP(switchName string) string {
 func HyperVGatewayCIDR(switchName string) string {
 	_, gatewayCIDR := hyperVGatewayForSwitch(switchName)
 	return gatewayCIDR
+}
+
+// HyperVSuggestedVMIP devuelve una IP sugerida para una VM dentro de la subred
+// interna del switch (reservando .1 para el gateway del host).
+func HyperVSuggestedVMIP(switchName string) string {
+	_, cidr := hyperVGatewayForSwitch(switchName)
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return "172.31.0.10"
+	}
+	base := prefix.Masked().Addr().As4()
+	return fmt.Sprintf("%d.%d.%d.10", base[0], base[1], base[2])
 }
 
 func hyperVGatewayForSwitch(switchName string) (gatewayIP string, cidr string) {
