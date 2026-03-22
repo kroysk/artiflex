@@ -338,17 +338,52 @@ func rewriteAndRestartTunnel(ifaceName, confPath string, fullTunnel bool, client
 		return fmt.Errorf("error escribiendo conf %q: %w", confPath, err)
 	}
 
-	// 2. Detener el servicio actual
+	// 2. Detener y desinstalar el servicio actual
 	if err := stopAndRemoveTunnel(ifaceName); err != nil {
 		return fmt.Errorf("error deteniendo túnel para reinicio: %w", err)
 	}
 
-	// 3. Reinstalar con el .conf actualizado
+	// 3. Esperar a que el servicio desaparezca del SCM antes de reinstalar.
+	//    wireguard.exe /uninstalltunnelservice es asíncrono — si reinstalamos
+	//    antes de que termine, falla con "Tunnel already installed and running".
+	svcName, err := conf.ServiceNameOfTunnel(ifaceName)
+	if err != nil {
+		return fmt.Errorf("error obteniendo nombre de servicio: %w", err)
+	}
+	if err := waitForServiceRemoved(svcName, 10*time.Second); err != nil {
+		return fmt.Errorf("timeout esperando desinstalación del servicio: %w", err)
+	}
+
+	// 4. Reinstalar con el .conf actualizado
 	if err := installAndStartTunnel(ifaceName, confPath); err != nil {
 		return fmt.Errorf("error reiniciando túnel: %w", err)
 	}
 
 	return nil
+}
+
+// waitForServiceRemoved espera hasta que un servicio Windows desaparezca del SCM.
+// Necesario después de wireguard.exe /uninstalltunnelservice, que es asíncrono.
+func waitForServiceRemoved(svcName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+
+	scm, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("error conectando al SCM: %w", err)
+	}
+	defer scm.Disconnect()
+
+	for time.Now().Before(deadline) {
+		s, err := scm.OpenService(svcName)
+		if err != nil {
+			// OpenService falló → el servicio ya no existe en el SCM
+			return nil
+		}
+		s.Close()
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return fmt.Errorf("timeout: el servicio %q no se desregistró del SCM", svcName)
 }
 
 // GetInterfaceName devuelve el nombre de interfaz Windows para una red activa
