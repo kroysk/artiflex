@@ -56,20 +56,28 @@ if (-not $adapter) {
 }
 
 # 3. Asignar IP al vEthernet
-# Eliminar TODAS las IPs IPv4 existentes en este adaptador antes de asignar la nuestra
-Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+# Verificar si la IP deseada ya esta asignada — si es asi, no hacer nada
+$currentIP = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq '%s' }
 
-# Esperar un momento para que Windows procese la eliminacion
-Start-Sleep -Milliseconds 300
+if (-not $currentIP) {
+    # Eliminar todas las IPs IPv4 existentes usando netsh (mas confiable que Remove-NetIPAddress)
+    $existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    foreach ($existingIP in $existingIPs) {
+        netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) | Out-Null
+    }
+    Start-Sleep -Milliseconds 500
 
-# Asignar la IP deseada
-New-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -IPAddress '%s' -PrefixLength %d -ErrorAction Stop | Out-Null
-Write-Host "IP %s/%d asignada a vEthernet (%s)"
+    # Asignar la IP deseada
+    New-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -IPAddress '%s' -PrefixLength %d -ErrorAction Stop | Out-Null
+    Write-Host "IP %s/%d asignada a vEthernet (%s)"
+} else {
+    Write-Host "IP %s/%d ya estaba asignada a vEthernet (%s)"
+}
 
-# 4. Habilitar IP Forwarding en ambos adaptadores y asignar métrica alta
+# 4. Habilitar IP Forwarding en ambos adaptadores y asignar metrica alta
 # para que Windows NO los use como ruta por defecto (tu red normal tiene
-# métrica ~25, estas interfaces tendrán 9000 — última prioridad siempre)
+# metrica ~25, estas interfaces tendran 9000 — ultima prioridad siempre)
 Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
 Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
@@ -78,9 +86,11 @@ Write-Host "OK: Hyper-V setup completo para '%s'"
 `,
 		switchName, switchName, switchName, switchName, // crear switch
 		switchName, switchName, // esperar adaptador
-		switchName,                // eliminar IPs existentes
+		switchName, ip, // verificar IP actual
+		switchName, switchName, // eliminar IPs con netsh
 		switchName, ip, prefixLen, // asignar IP nueva
-		ip, prefixLen, switchName, // log
+		ip, prefixLen, switchName, // log asignacion
+		ip, prefixLen, switchName, // log ya existia
 		switchName, ifaceName, // forwarding
 		switchName, // log final
 	)
