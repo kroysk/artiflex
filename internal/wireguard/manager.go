@@ -134,6 +134,9 @@ func (m *Manager) ShutdownAll() {
 		}
 		delete(m.interfaces, id)
 	}
+
+	// Detener cualquier DHCP embebido de Hyper-V al cerrar Prexo.
+	stopAllHyperVDHCP()
 }
 
 // CleanupOrphans busca y elimina archivos .conf huérfanos en nuestro directorio

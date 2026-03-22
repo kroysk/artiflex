@@ -123,7 +123,16 @@ Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
 Write-Host "OK: Hyper-V setup completo para '%s'"
 `, s, ifaceName, s)
 
-	return runPowerShell(part1 + part2 + part3)
+	if err := runPowerShell(part1 + part2 + part3); err != nil {
+		return err
+	}
+
+	// 6. Levantar DHCP para que las VMs obtengan IP/gateway/DNS automáticamente.
+	if err := startHyperVDHCPForSwitch(switchName, gatewayIP, gatewayCIDR); err != nil {
+		return fmt.Errorf("setup Hyper-V ok pero falló DHCP: %w", err)
+	}
+
+	return nil
 }
 
 // HyperVGatewayIP devuelve la gateway IPv4 que deben usar las VMs para un switch.
@@ -232,7 +241,12 @@ Write-Host "OK: Hyper-V teardown completo para '%s'"
 		switchName, // log final
 	)
 
-	return runPowerShell(script)
+	if err := runPowerShell(script); err != nil {
+		return err
+	}
+
+	stopHyperVDHCPForSwitch(switchName)
+	return nil
 }
 
 // HyperVSwitchExists reporta si el Internal Switch ya existe en Hyper-V
