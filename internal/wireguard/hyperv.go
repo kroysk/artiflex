@@ -23,18 +23,16 @@ func HyperVSetup(switchName, clientIP, ifaceName string) error {
 	}
 
 	ip := prefix.Addr().String()
-	// Calcular la máscara de subred en Go y pasarla como string al script
-	// ej: prefixLen=24 → "255.255.255.0"
 	mask := prefixLenToMask(prefix.Bits())
 
 	// Script PowerShell:
 	// 1. Crea el Internal Switch si no existe
 	// 2. Espera el adaptador vEthernet
-	// 3. Elimina IPs existentes con netsh + asigna la nueva con netsh
+	// 3. Asigna IP solo si la IP correcta no está ya asignada:
+	//    - Elimina IPs existentes con netsh (ignorando errores)
+	//    - Asigna la IP deseada con netsh (ignorando "already exists")
+	//    - Verifica que la IP correcta quedó asignada al final
 	// 4. Habilita IP Forwarding en vEthernet y WireGuard
-	//
-	// Usamos netsh para delete+add de IP porque opera a nivel más bajo que
-	// New-NetIPAddress y no falla con "object already exists" por race conditions.
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 
@@ -61,36 +59,51 @@ if (-not $adapter) {
     throw "No se encontro el adaptador vEthernet (%s) despues de 10 segundos"
 }
 
-# 3. Eliminar TODAS las IPs IPv4 existentes con netsh
-$existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
-foreach ($existingIP in $existingIPs) {
-    netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) | Out-Null
+# 3. Asignar IP — verificar primero si la IP correcta ya está asignada
+$correctIP = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq '%s' }
+
+if ($correctIP) {
+    Write-Host "IP %s ya estaba asignada correctamente a vEthernet (%s)"
+} else {
+    # Eliminar IPs existentes con netsh (silencioso — puede fallar si no hay ninguna)
+    $existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    foreach ($existingIP in $existingIPs) {
+        netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) 2>$null | Out-Null
+    }
+    Start-Sleep -Milliseconds 800
+
+    # Asignar con netsh — ignorar exit code porque puede reportar "already exists"
+    # aunque la asignación haya sido exitosa
+    netsh interface ipv4 add address "vEthernet (%s)" address='%s' mask='%s' 2>$null | Out-Null
+
+    # Verificar que la IP quedó asignada correctamente (esta es la fuente de verdad)
+    Start-Sleep -Milliseconds 500
+    $assigned = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq '%s' }
+    if (-not $assigned) {
+        throw "No se pudo asignar la IP %s a vEthernet (%s) — verificar permisos"
+    }
+    Write-Host "IP %s/%s asignada a vEthernet (%s)"
 }
 
-# Dar tiempo al stack de red para procesar las eliminaciones
-Start-Sleep -Milliseconds 800
-
-# Asignar la IP con netsh — más confiable que New-NetIPAddress
-netsh interface ipv4 add address "vEthernet (%s)" address='%s' mask='%s'
-if ($LASTEXITCODE -ne 0) {
-    throw "Error asignando IP %s/%s a vEthernet (%s)"
-}
-Write-Host "IP %s/%s asignada a vEthernet (%s)"
-
-# 4. Habilitar IP Forwarding y asignar metrica alta en ambos adaptadores
+# 4. Habilitar IP Forwarding y metrica alta en ambos adaptadores
 Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
 Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
 
 Write-Host "OK: Hyper-V setup completo para '%s'"
 `,
-		switchName, switchName, switchName, switchName, // 1. crear switch (4x)
-		switchName, switchName, // 2. esperar adaptador (2x)
-		switchName, switchName, // 3. eliminar IPs (2x)
-		switchName, ip, mask, // 3. netsh add (switchName, ip, mask)
-		ip, mask, switchName, // throw error
-		ip, mask, switchName, // log asignacion
-		switchName, ifaceName, // 4. forwarding
+		switchName, switchName, switchName, switchName, // 1. crear switch (4x %s)
+		switchName, switchName, // 2. esperar adaptador (2x %s)
+		switchName, ip, // 3. verificar IP correcta (switchName, ip)
+		ip, switchName, // log ya existia (ip, switchName)
+		switchName, switchName, // eliminar IPs existentes (2x switchName)
+		switchName, ip, mask, // netsh add (switchName, ip, mask)
+		switchName, ip, // verificar asignacion (switchName, ip)
+		ip, switchName, // throw si fallo (ip, switchName)
+		ip, mask, switchName, // log asignacion exitosa (ip, mask, switchName)
+		switchName, ifaceName, // 4. forwarding (2x)
 		switchName, // log final
 	)
 
