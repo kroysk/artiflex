@@ -23,12 +23,18 @@ func HyperVSetup(switchName, clientIP, ifaceName string) error {
 	}
 
 	ip := prefix.Addr().String()
-	prefixLen := prefix.Bits()
+	// Calcular la máscara de subred en Go y pasarla como string al script
+	// ej: prefixLen=24 → "255.255.255.0"
+	mask := prefixLenToMask(prefix.Bits())
 
-	// Script PowerShell que:
+	// Script PowerShell:
 	// 1. Crea el Internal Switch si no existe
-	// 2. Asigna la IP al adaptador vEthernet que Hyper-V crea automáticamente
-	// 3. Habilita IP Forwarding en ambos adaptadores (vEthernet y WireGuard)
+	// 2. Espera el adaptador vEthernet
+	// 3. Elimina IPs existentes con netsh + asigna la nueva con netsh
+	// 4. Habilita IP Forwarding en vEthernet y WireGuard
+	//
+	// Usamos netsh para delete+add de IP porque opera a nivel más bajo que
+	// New-NetIPAddress y no falla con "object already exists" por race conditions.
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 
@@ -41,7 +47,7 @@ if (-not $switch) {
     Write-Host "Switch '%s' ya existe"
 }
 
-# 2. Esperar a que Windows cree el adaptador vEthernet
+# 2. Esperar a que Windows cree el adaptador vEthernet (hasta 10 segundos)
 $adapter = $null
 $attempts = 0
 while (-not $adapter -and $attempts -lt 20) {
@@ -55,47 +61,50 @@ if (-not $adapter) {
     throw "No se encontro el adaptador vEthernet (%s) despues de 10 segundos"
 }
 
-# 3. Asignar IP al vEthernet
-# Verificar si la IP deseada ya esta asignada — si es asi, no hacer nada
-$currentIP = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -eq '%s' }
-
-if (-not $currentIP) {
-    # Eliminar todas las IPs IPv4 existentes usando netsh (mas confiable que Remove-NetIPAddress)
-    $existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    foreach ($existingIP in $existingIPs) {
-        netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) | Out-Null
-    }
-    Start-Sleep -Milliseconds 500
-
-    # Asignar la IP deseada
-    New-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -IPAddress '%s' -PrefixLength %d -ErrorAction Stop | Out-Null
-    Write-Host "IP %s/%d asignada a vEthernet (%s)"
-} else {
-    Write-Host "IP %s/%d ya estaba asignada a vEthernet (%s)"
+# 3. Eliminar TODAS las IPs IPv4 existentes con netsh
+$existingIPs = Get-NetIPAddress -InterfaceAlias 'vEthernet (%s)' -AddressFamily IPv4 -ErrorAction SilentlyContinue
+foreach ($existingIP in $existingIPs) {
+    netsh interface ipv4 delete address "vEthernet (%s)" addr=$($existingIP.IPAddress) | Out-Null
 }
 
-# 4. Habilitar IP Forwarding en ambos adaptadores y asignar metrica alta
-# para que Windows NO los use como ruta por defecto (tu red normal tiene
-# metrica ~25, estas interfaces tendran 9000 — ultima prioridad siempre)
+# Dar tiempo al stack de red para procesar las eliminaciones
+Start-Sleep -Milliseconds 800
+
+# Asignar la IP con netsh — más confiable que New-NetIPAddress
+netsh interface ipv4 add address "vEthernet (%s)" address='%s' mask='%s'
+if ($LASTEXITCODE -ne 0) {
+    throw "Error asignando IP %s/%s a vEthernet (%s)"
+}
+Write-Host "IP %s/%s asignada a vEthernet (%s)"
+
+# 4. Habilitar IP Forwarding y asignar metrica alta en ambos adaptadores
 Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
 Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
 
 Write-Host "OK: Hyper-V setup completo para '%s'"
 `,
-		switchName, switchName, switchName, switchName, // crear switch
-		switchName, switchName, // esperar adaptador
-		switchName, ip, // verificar IP actual
-		switchName, switchName, // eliminar IPs con netsh
-		switchName, ip, prefixLen, // asignar IP nueva
-		ip, prefixLen, switchName, // log asignacion
-		ip, prefixLen, switchName, // log ya existia
-		switchName, ifaceName, // forwarding
+		switchName, switchName, switchName, switchName, // 1. crear switch (4x)
+		switchName, switchName, // 2. esperar adaptador (2x)
+		switchName, switchName, // 3. eliminar IPs (2x)
+		switchName, ip, mask, // 3. netsh add (switchName, ip, mask)
+		ip, mask, switchName, // throw error
+		ip, mask, switchName, // log asignacion
+		switchName, ifaceName, // 4. forwarding
 		switchName, // log final
 	)
 
 	return runPowerShell(script)
+}
+
+// prefixLenToMask convierte un prefijo CIDR a máscara de subred en notación decimal
+// ej: 24 → "255.255.255.0", 16 → "255.255.0.0"
+func prefixLenToMask(bits int) string {
+	var mask [4]byte
+	for i := 0; i < bits; i++ {
+		mask[i/8] |= 1 << (7 - uint(i%8))
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
 }
 
 // HyperVTeardown elimina el Internal Switch de Hyper-V y limpia la configuración
