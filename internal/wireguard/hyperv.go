@@ -4,7 +4,6 @@ package wireguard
 
 import (
 	"fmt"
-	"hash/fnv"
 	"os/exec"
 	"strings"
 )
@@ -16,7 +15,7 @@ import (
 // switchName  — nombre del switch (igual al nombre de la red en Prexo)
 // ifaceName   — nombre de la interfaz WireGuard, ej: "wg-prexo-0"
 func HyperVSetup(switchName, ifaceName string) error {
-	gatewayIP, _ := hyperVGatewayForSwitch(switchName)
+	gatewayIP := HyperVGatewayIP(switchName)
 	mask := "255.255.255.0"
 
 	s := switchName
@@ -164,23 +163,6 @@ func HyperVGatewayCIDR(switchName string) string {
 func HyperVSuggestedVMIP(switchName string) string {
 	_ = switchName
 	return "192.168.137.10"
-}
-
-func hyperVGatewayForSwitch(switchName string) (gatewayIP string, cidr string) {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(switchName))))
-	octet := int(h.Sum32()%254) + 1 // 1..254 dentro de 172.31.0.0/16
-	return fmt.Sprintf("172.31.%d.1", octet), fmt.Sprintf("172.31.%d.0/24", octet)
-}
-
-// prefixLenToMask convierte un prefijo CIDR a máscara de subred en notación decimal
-// ej: 24 → "255.255.255.0", 16 → "255.255.0.0"
-func prefixLenToMask(bits int) string {
-	var mask [4]byte
-	for i := 0; i < bits; i++ {
-		mask[i/8] |= 1 << (7 - uint(i%8))
-	}
-	return fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
 }
 
 // HyperVTeardown elimina el Internal Switch de Hyper-V y limpia la configuración
