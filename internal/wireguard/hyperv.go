@@ -5,20 +5,18 @@ package wireguard
 import (
 	"fmt"
 	"hash/fnv"
-	"net/netip"
 	"os/exec"
 	"strings"
 )
 
 // HyperVSetup crea un Internal Switch en Hyper-V para la red dada,
-// asigna una gateway IP dedicada al adaptador vEthernet y habilita IP Forwarding
-// + NAT hacia la interfaz WireGuard del túnel.
+// habilita IP Forwarding y configura ICS (Internet Connection Sharing)
+// para que SOLO las VMs salgan por la interfaz WireGuard.
 //
 // switchName  — nombre del switch (igual al nombre de la red en Prexo)
 // ifaceName   — nombre de la interfaz WireGuard, ej: "wg-prexo-0"
 func HyperVSetup(switchName, ifaceName string) error {
-	gatewayIP, gatewayCIDR := hyperVGatewayForSwitch(switchName)
-	natName := hyperVNatName(switchName)
+	gatewayIP, _ := hyperVGatewayForSwitch(switchName)
 	mask := "255.255.255.0"
 
 	s := switchName
@@ -95,68 +93,77 @@ for ($i = 0; $i -lt 5; $i++) {
 if (-not $assigned) {
     throw "No se pudo asignar la IP $targetIP a $alias despues de 5 intentos"
 }
-
-# 4. Configurar NAT para salida de VMs hacia WireGuard
-$natName = '%s'
-$natPrefix = '%s'
-$existingNat = Get-NetNat -Name $natName -ErrorAction SilentlyContinue
-
-if ($existingNat) {
-    if ($existingNat.InternalIPInterfaceAddressPrefix -ne $natPrefix) {
-        Remove-NetNat -Name $natName -Confirm:$false | Out-Null
-        New-NetNat -Name $natName -InternalIPInterfaceAddressPrefix $natPrefix | Out-Null
-        Write-Host "NAT $natName recreado con prefijo $natPrefix"
-    } else {
-        Write-Host "NAT $natName ya existe con prefijo correcto"
-    }
-} else {
-    New-NetNat -Name $natName -InternalIPInterfaceAddressPrefix $natPrefix | Out-Null
-    Write-Host "NAT $natName creado con prefijo $natPrefix"
-}
-`, gatewayIP, mask, s, natName, gatewayCIDR)
+`, gatewayIP, mask, s)
 
 	part3 := fmt.Sprintf(`
-# 5. Habilitar IP Forwarding y metrica alta en ambos adaptadores
+# 4. Habilitar IP Forwarding y metrica alta en ambos adaptadores
 Set-NetIPInterface -InterfaceAlias 'vEthernet (%s)' -Forwarding Enabled -InterfaceMetric 9000
 Set-NetIPInterface -InterfaceAlias '%s' -Forwarding Enabled -InterfaceMetric 9000 -ErrorAction SilentlyContinue
 Write-Host "IP Forwarding habilitado, metrica 9000 asignada"
+
+# 5. Configurar ICS: WireGuard compartido hacia vEthernet del switch.
+$publicAlias = '%s'
+$privateAlias = 'vEthernet (%s)'
+
+$hnet = New-Object -ComObject HNetCfg.HNetShare
+$publicConn = $null
+$privateConn = $null
+
+foreach ($conn in $hnet.EnumEveryConnection()) {
+    $props = $hnet.NetConnectionProps($conn)
+    if ($props.Name -eq $publicAlias) { $publicConn = $conn }
+    if ($props.Name -eq $privateAlias) { $privateConn = $conn }
+}
+
+if (-not $publicConn) { throw "No se encontro interfaz WireGuard para ICS: $publicAlias" }
+if (-not $privateConn) { throw "No se encontro interfaz privada para ICS: $privateAlias" }
+
+# Apagar sharing existente para evitar colisiones (ICS solo permite un public sharing activo)
+foreach ($conn in $hnet.EnumEveryConnection()) {
+    $cfg = $hnet.INetSharingConfigurationForINetConnection($conn)
+    if ($cfg.SharingEnabled) {
+        try { $cfg.DisableSharing() } catch {}
+    }
+}
+
+$publicCfg = $hnet.INetSharingConfigurationForINetConnection($publicConn)
+$privateCfg = $hnet.INetSharingConfigurationForINetConnection($privateConn)
+
+# 0 = Public (internet), 1 = Private (home network)
+$publicCfg.EnableSharing(0)
+$privateCfg.EnableSharing(1)
+Write-Host "ICS habilitado: $publicAlias -> $privateAlias"
+
 Write-Host "OK: Hyper-V setup completo para '%s'"
-`, s, ifaceName, s)
+`, s, ifaceName, ifaceName, s, s)
 
 	if err := runPowerShell(part1 + part2 + part3); err != nil {
 		return err
 	}
 
-	// 6. Levantar DHCP para que las VMs obtengan IP/gateway/DNS automáticamente.
-	if err := startHyperVDHCPForSwitch(switchName, gatewayIP, gatewayCIDR); err != nil {
-		return fmt.Errorf("setup Hyper-V ok pero falló DHCP: %w", err)
-	}
+	// 6. Asegurar que no quede activo el DHCP embebido de implementaciones previas.
+	stopHyperVDHCPForSwitch(switchName)
 
 	return nil
 }
 
 // HyperVGatewayIP devuelve la gateway IPv4 que deben usar las VMs para un switch.
 func HyperVGatewayIP(switchName string) string {
-	gatewayIP, _ := hyperVGatewayForSwitch(switchName)
-	return gatewayIP
+	_ = switchName
+	return "192.168.137.1"
 }
 
 // HyperVGatewayCIDR devuelve la subred interna (CIDR) asignada al switch.
 func HyperVGatewayCIDR(switchName string) string {
-	_, gatewayCIDR := hyperVGatewayForSwitch(switchName)
-	return gatewayCIDR
+	_ = switchName
+	return "192.168.137.0/24"
 }
 
 // HyperVSuggestedVMIP devuelve una IP sugerida para una VM dentro de la subred
 // interna del switch (reservando .1 para el gateway del host).
 func HyperVSuggestedVMIP(switchName string) string {
-	_, cidr := hyperVGatewayForSwitch(switchName)
-	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return "172.31.0.10"
-	}
-	base := prefix.Masked().Addr().As4()
-	return fmt.Sprintf("%d.%d.%d.10", base[0], base[1], base[2])
+	_ = switchName
+	return "192.168.137.10"
 }
 
 func hyperVGatewayForSwitch(switchName string) (gatewayIP string, cidr string) {
@@ -164,25 +171,6 @@ func hyperVGatewayForSwitch(switchName string) (gatewayIP string, cidr string) {
 	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(switchName))))
 	octet := int(h.Sum32()%254) + 1 // 1..254 dentro de 172.31.0.0/16
 	return fmt.Sprintf("172.31.%d.1", octet), fmt.Sprintf("172.31.%d.0/24", octet)
-}
-
-func hyperVNatName(switchName string) string {
-	base := strings.ToLower(strings.TrimSpace(switchName))
-	base = strings.ReplaceAll(base, " ", "-")
-	var b strings.Builder
-	for _, r := range base {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			b.WriteRune(r)
-		}
-	}
-	clean := b.String()
-	if clean == "" {
-		clean = "default"
-	}
-	if len(clean) > 32 {
-		clean = clean[:32]
-	}
-	return "prexo-nat-" + clean
 }
 
 // prefixLenToMask convierte un prefijo CIDR a máscara de subred en notación decimal
@@ -201,16 +189,18 @@ func prefixLenToMask(bits int) string {
 // switchName — nombre del switch a eliminar
 // ifaceName  — nombre de la interfaz WireGuard, ej: "wg-prexo-0"
 func HyperVTeardown(switchName, ifaceName string) error {
-	natName := hyperVNatName(switchName)
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 
-# 1. Eliminar NAT asociado al switch
-$nat = Get-NetNat -Name '%s' -ErrorAction SilentlyContinue
-if ($nat) {
-    Remove-NetNat -Name '%s' -Confirm:$false | Out-Null
-    Write-Host "NAT '%s' eliminado"
+# 1. Deshabilitar ICS (si está activo)
+$hnet = New-Object -ComObject HNetCfg.HNetShare
+foreach ($conn in $hnet.EnumEveryConnection()) {
+    $cfg = $hnet.INetSharingConfigurationForINetConnection($conn)
+    if ($cfg.SharingEnabled) {
+        try { $cfg.DisableSharing() } catch {}
+    }
 }
+Write-Host "ICS deshabilitado"
 
 # 2. Deshabilitar IP Forwarding en el vEthernet y restaurar métrica automática
 $adapter = Get-NetAdapter | Where-Object { $_.Name -eq 'vEthernet (%s)' } -ErrorAction SilentlyContinue
@@ -234,7 +224,6 @@ if ($switch) {
 
 Write-Host "OK: Hyper-V teardown completo para '%s'"
 `,
-		natName, natName, natName, // NAT
 		switchName, switchName, switchName, // forwarding vEthernet
 		ifaceName, ifaceName, // forwarding WireGuard
 		switchName, switchName, switchName, switchName, // eliminar switch
