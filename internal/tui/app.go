@@ -15,6 +15,7 @@ const (
 	screenTutorialsMenu
 	screenTutorialOracle
 	screenTutorialGoogle
+	screenTutorialWin7VM
 	screenDetail
 )
 
@@ -78,7 +79,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case screenTutorialsMenu:
 				a.current = screenList
 				return a, nil
-			case screenTutorialOracle, screenTutorialGoogle:
+			case screenTutorialOracle, screenTutorialGoogle, screenTutorialWin7VM:
 				a.current = screenTutorialsMenu
 				return a, nil
 			case screenDetail:
@@ -102,7 +103,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// N desde cualquier pantalla de tutorial va directo al formulario
-		if (a.current == screenTutorialOracle || a.current == screenTutorialGoogle) && msg.String() == "n" {
+		if (a.current == screenTutorialOracle || a.current == screenTutorialGoogle || a.current == screenTutorialWin7VM) && msg.String() == "n" {
 			a.current = screenForm
 			a.form = newFormModel(a.store, a.wgManager)
 			return a, a.form.Init()
@@ -115,6 +116,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.current = screenTutorialOracle
 		case ProviderGoogle:
 			a.current = screenTutorialGoogle
+		case ProviderWin7VM:
+			a.current = screenTutorialWin7VM
 		}
 		a.tutorial = newTutorialModel(msg.Provider, a.width, a.height)
 		return a, a.tutorial.Init()
@@ -163,7 +166,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tutorialsMenu, cmd = a.tutorialsMenu.Update(msg)
 		return a, cmd
 
-	case screenTutorialOracle, screenTutorialGoogle:
+	case screenTutorialOracle, screenTutorialGoogle, screenTutorialWin7VM:
 		var cmd tea.Cmd
 		a.tutorial, cmd = a.tutorial.Update(msg)
 		return a, cmd
@@ -183,7 +186,7 @@ func (a App) View() string {
 		return a.form.View()
 	case screenTutorialsMenu:
 		return a.tutorialsMenu.View()
-	case screenTutorialOracle, screenTutorialGoogle:
+	case screenTutorialOracle, screenTutorialGoogle, screenTutorialWin7VM:
 		return a.tutorial.View()
 	case screenDetail:
 		return a.detail.View()

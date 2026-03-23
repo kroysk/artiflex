@@ -33,6 +33,12 @@ var tutorialOptions = []tutorialOption{
 		description: "1 VM e2-micro gratis para siempre en us-east1, us-west1 o us-central1",
 		icon:        "◆",
 	},
+	{
+		provider:    ProviderWin7VM,
+		title:       "VM Windows 7 en Hyper-V",
+		description: "Cómo conectar Win7 a Prexo y resolver Media disconnected (Legacy Adapter)",
+		icon:        "◆",
+	},
 }
 
 // tutorialsMenuModel es la pantalla de selección de tutoriales

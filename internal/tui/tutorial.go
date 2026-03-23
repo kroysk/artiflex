@@ -15,6 +15,7 @@ type Provider int
 const (
 	ProviderOracle Provider = iota
 	ProviderGoogle
+	ProviderWin7VM
 )
 
 // tutorialModel es la pantalla de guía paso a paso para configurar el servidor
@@ -92,6 +93,8 @@ func (m tutorialModel) View() string {
 		title = "Prexo — Setup Oracle Cloud (Always Free)"
 	case ProviderGoogle:
 		title = "Prexo — Setup Google Cloud (Free Tier)"
+	case ProviderWin7VM:
+		title = "Prexo — Tutorial VM Windows 7 (Hyper-V)"
 	}
 
 	scrollPct := int(m.viewport.ScrollPercent() * 100)
@@ -111,6 +114,8 @@ func (m tutorialModel) buildContent() string {
 		return buildOracleTutorial()
 	case ProviderGoogle:
 		return buildGoogleTutorial()
+	case ProviderWin7VM:
+		return buildWin7VMTutorial()
 	}
 	return ""
 }
@@ -356,6 +361,66 @@ func buildGoogleTutorial() string {
 	sb.WriteString(line("  ", successStyle.Render("✓ Listo. Presioná Space en Prexo para activar la red.")))
 	sb.WriteString(line())
 	sb.WriteString(line("  ", noteStyle.Render("ℹ  Google Free Tier solo da 1 VM e2-micro gratis. Para una segunda VM\n     usá los $300 de crédito o considerá Oracle Cloud para la segunda.")))
+	sb.WriteString(line())
+
+	return sb.String()
+}
+
+// ─── Tutorial Windows 7 VM (Hyper-V) ─────────────────────────────────────────
+
+func buildWin7VMTutorial() string {
+	var sb strings.Builder
+
+	sb.WriteString(line())
+	sb.WriteString(line(sectionStyle.Render("━━━  OBJETIVO  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  Conectar una VM Windows 7 a una red de Prexo en Hyper-V"))
+	sb.WriteString(line("  y salir a internet de forma estable."))
+	sb.WriteString(line())
+
+	sb.WriteString(line(sectionStyle.Render("━━━  PASO 1 — LEVANTAR RED EN PREXO  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  ", stepStyle.Render("1.1"), "  Activá tu red con ", codeStyle.Render("Space")))
+	sb.WriteString(line("  ", stepStyle.Render("1.2"), "  Abrí detalle con ", codeStyle.Render("Enter")))
+	sb.WriteString(line("  ", stepStyle.Render("1.3"), "  Configurá Hyper-V con ", codeStyle.Render("H"), " (switch + NAT + DHCP)"))
+	sb.WriteString(line())
+
+	sb.WriteString(line(sectionStyle.Render("━━━  PASO 2 — ADAPTADOR CORRECTO PARA WIN7  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  Si la NIC aparece como ", codeStyle.Render("Media disconnected"), ", usá ", codeStyle.Render("Legacy Network Adapter"), "."))
+	sb.WriteString(line("  Hyper-V: VM apagada → Settings → Add Hardware → Legacy Network Adapter"))
+	sb.WriteString(line("  Conectalo al switch de tu red Prexo (ej: ", codeStyle.Render("Google 1"), ")."))
+	sb.WriteString(line())
+
+	sb.WriteString(line(sectionStyle.Render("━━━  PASO 3 — CONFIGURAR RED EN WIN7  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  Recomendado: ", codeStyle.Render("DHCP automático"), " en IPv4."))
+	sb.WriteString(line("  Si DHCP no levanta, usá manual:"))
+	sb.WriteString(line("    • IP: 172.31.X.10"))
+	sb.WriteString(line("    • Máscara: 255.255.255.0"))
+	sb.WriteString(line("    • Gateway: 172.31.X.1"))
+	sb.WriteString(line("    • DNS: 1.1.1.1 / 8.8.8.8"))
+	sb.WriteString(line())
+
+	sb.WriteString(line(sectionStyle.Render("━━━  PASO 4 — VALIDAR CONECTIVIDAD  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  En CMD de la VM:"))
+	sb.WriteString(line("  ", codeStyle.Render("ipconfig /all")))
+	sb.WriteString(line("  ", codeStyle.Render("ping <gateway-VM>"), "   (ej: ping 172.31.38.1)"))
+	sb.WriteString(line("  ", codeStyle.Render("ping 8.8.8.8")))
+	sb.WriteString(line("  ", codeStyle.Render("nslookup google.com")))
+	sb.WriteString(line())
+
+	sb.WriteString(line(sectionStyle.Render("━━━  TROUBLESHOOT RÁPIDO  ━━━")))
+	sb.WriteString(line())
+	sb.WriteString(line("  • ", codeStyle.Render("Media disconnected"), ": NIC equivocada o sin link"))
+	sb.WriteString(line("  • Sin gateway: DHCP no asignó o config manual incompleta"))
+	sb.WriteString(line("  • Ping a gateway falla: problema de capa 2 (adapter/switch)"))
+	sb.WriteString(line("  • Ping a gateway ok pero no 8.8.8.8: revisar NAT"))
+	sb.WriteString(line("  • 8.8.8.8 ok pero sin dominio: revisar DNS"))
+	sb.WriteString(line())
+
+	sb.WriteString(line(successStyle.Render("✓ Win7 listo para navegar por la red de Prexo")))
 	sb.WriteString(line())
 
 	return sb.String()
